@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         YouTube Playlist Total Duration & Remaining
 // @namespace    http://tampermonkey.net/
-// @version      3.4
-// @description  Calculates total playlist time + time remaining and displays it next to the video count. Handles SPA navigation correctly.
-// @author       You
+// @version      3.5
+// @description  Calculates total playlist time + time remaining (adjusted for playback speed) and displays it next to the video count. Handles SPA navigation correctly.
 // @match        https://www.youtube.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @grant        none
@@ -18,6 +17,11 @@
     // Global timers to manage cleanup during navigation
     let activePollInterval = null;
     let activeFallbackTimeout = null;
+
+    // State for reactivity (Speed changes)
+    let gTotalSeconds = 0;
+    let gRemainingSeconds = 0;
+    let videoElement = null;
 
     // --- 1. CORE LOGIC ---
     
@@ -62,16 +66,55 @@
 
         if (videoCount === 0) return false;
 
-        // Calculate final strings
-        const formattedTotal = formatTime(totalSeconds);
-        const formattedRemaining = formatDecimalHours(remainingSeconds);
-        const finalText = ` • ${formattedTotal} (${formattedRemaining} left)`;
+        // Save state for speed updates
+        gTotalSeconds = totalSeconds;
+        gRemainingSeconds = remainingSeconds;
 
-        pollAndInject(finalText);
+        // Attach listener for speed changes
+        setupSpeedListener();
+
+        // Perform initial UI update
+        updateUIText();
+
         return true;
     }
 
-    // --- 2. HELPERS ---
+    // --- 2. SPEED REACTIVITY ---
+
+    function setupSpeedListener() {
+        const vid = document.querySelector('video');
+        
+        // Only attach if it's a new element or we haven't attached yet
+        if (vid && vid !== videoElement) {
+            // Cleanup old listener if exists
+            if (videoElement) {
+                videoElement.removeEventListener('ratechange', updateUIText);
+            }
+            
+            videoElement = vid;
+            videoElement.addEventListener('ratechange', updateUIText);
+        }
+    }
+
+    function updateUIText() {
+        // Get current speed (Default to 1 if not found)
+        const speed = videoElement ? videoElement.playbackRate : 1;
+        const effectiveSpeed = speed > 0 ? speed : 1;
+
+        // Calculate adjusted remaining time
+        const adjustedRemaining = gRemainingSeconds / effectiveSpeed;
+
+        // Format
+        const formattedTotal = formatTime(gTotalSeconds);
+        const formattedRemaining = formatDecimalHours(adjustedRemaining);
+        
+        // removed leading space as requested
+        const finalText = `• ${formattedTotal} (${formattedRemaining} left)`;
+
+        pollAndInject(finalText);
+    }
+
+    // --- 3. HELPERS ---
     
     function parseDuration(timeStr) {
         if (!timeStr) return 0;
@@ -119,10 +162,18 @@
         }
     }
 
-    // --- 3. UI INJECTION ---
+    // --- 4. UI INJECTION ---
     
     function pollAndInject(textToInject) {
-        // Clear any previous pollers so the latest text (Loading or Final) takes precedence
+        // Optimization: If element already exists, update immediately for reactivity
+        // This makes scrolling the speed wheel feel instant
+        const existingSpan = document.getElementById(INJECTED_ID);
+        if (existingSpan) {
+            existingSpan.textContent = textToInject;
+            return;
+        }
+
+        // Standard Polling for initial creation (waiting for container)
         if (activePollInterval) clearInterval(activePollInterval);
 
         let attempts = 0;
@@ -131,7 +182,6 @@
             attempts++;
             const indexWrapper = document.querySelector(TARGET_CONTAINER_SELECTOR);
             
-            // Check visibility
             const isVisible = indexWrapper && (indexWrapper.offsetWidth > 0 || indexWrapper.offsetHeight > 0);
 
             if (isVisible) {
@@ -140,7 +190,7 @@
                 injectText(indexWrapper, textToInject);
             }
 
-            if (attempts > 20) { // ~10 seconds timeout
+            if (attempts > 20) { 
                  clearInterval(activePollInterval);
                  activePollInterval = null;
             }
@@ -166,12 +216,12 @@
         console.log(`Playlist UI Updated: ${text}`);
     }
 
-    // --- 4. EXECUTION HANDLERS ---
+    // --- 5. EXECUTION HANDLERS ---
 
     function handleInitialLoad() {
         // Show loading if it looks like a playlist page
         if (new URLSearchParams(window.location.search).has('list')) {
-            pollAndInject(" • Calculating...");
+            pollAndInject("• Calculating...");
         }
 
         if (window.ytInitialData) {
@@ -184,10 +234,14 @@
 
         // 1. Trigger Loading State immediately if it's a playlist
         if (new URLSearchParams(window.location.search).has('list')) {
-            pollAndInject(" • Calculating...");
+            pollAndInject("• Calculating...");
         } else {
-            // Not a playlist, don't show anything (and ensure cleanup)
             removeInjectedElement();
+            // Also detach listener to be clean
+            if (videoElement) {
+                videoElement.removeEventListener('ratechange', updateUIText);
+                videoElement = null;
+            }
             return;
         }
 
@@ -215,19 +269,17 @@
                     processPlaylistData(mockSource);
                 } else {
                     console.log("Playlist Time: Could not find fresh playlist data.");
-                    // If we failed to find data after waiting, remove the "Calculating..." text
                     removeInjectedElement();
                 }
         }, 1500); 
     }
     
     function handleNavigationStart() {
-        // STOP everything from the previous page
         clearTimers();
         removeInjectedElement();
     }
 
-    // --- 5. LISTENERS ---
+    // --- 6. LISTENERS ---
     
     handleInitialLoad();
     window.addEventListener('yt-navigate-start', handleNavigationStart);
