@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Playlist Total Duration & Remaining
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.4
 // @description  Calculates total playlist time + time remaining and displays it next to the video count. Handles SPA navigation correctly.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -62,7 +62,12 @@
 
         if (videoCount === 0) return false;
 
-        pollAndInject(totalSeconds, remainingSeconds);
+        // Calculate final strings
+        const formattedTotal = formatTime(totalSeconds);
+        const formattedRemaining = formatDecimalHours(remainingSeconds);
+        const finalText = ` • ${formattedTotal} (${formattedRemaining} left)`;
+
+        pollAndInject(finalText);
         return true;
     }
 
@@ -116,8 +121,8 @@
 
     // --- 3. UI INJECTION ---
     
-    function pollAndInject(totalSeconds, remainingSeconds) {
-        // Clear any previous pollers to prevent conflicts
+    function pollAndInject(textToInject) {
+        // Clear any previous pollers so the latest text (Loading or Final) takes precedence
         if (activePollInterval) clearInterval(activePollInterval);
 
         let attempts = 0;
@@ -126,27 +131,23 @@
             attempts++;
             const indexWrapper = document.querySelector(TARGET_CONTAINER_SELECTOR);
             
+            // Check visibility
             const isVisible = indexWrapper && (indexWrapper.offsetWidth > 0 || indexWrapper.offsetHeight > 0);
 
             if (isVisible) {
                 clearInterval(activePollInterval);
                 activePollInterval = null;
-                injectText(indexWrapper, totalSeconds, remainingSeconds);
+                injectText(indexWrapper, textToInject);
             }
 
-            if (attempts > 20) { 
+            if (attempts > 20) { // ~10 seconds timeout
                  clearInterval(activePollInterval);
                  activePollInterval = null;
             }
         }, 500);
     }
 
-    function injectText(container, totalSeconds, remainingSeconds) {
-        const formattedTotal = formatTime(totalSeconds);
-        const formattedRemaining = formatDecimalHours(remainingSeconds);
-        
-        const finalText = ` • ${formattedTotal} (${formattedRemaining} left)`;
-
+    function injectText(container, text) {
         let durationSpan = document.getElementById(INJECTED_ID);
         
         if (!durationSpan) {
@@ -161,27 +162,42 @@
             container.appendChild(durationSpan);
         }
 
-        durationSpan.textContent = finalText;
-        console.log(`Playlist Updated: ${finalText}`);
+        durationSpan.textContent = text;
+        console.log(`Playlist UI Updated: ${text}`);
     }
 
     // --- 4. EXECUTION HANDLERS ---
 
     function handleInitialLoad() {
+        // Show loading if it looks like a playlist page
+        if (new URLSearchParams(window.location.search).has('list')) {
+            pollAndInject(" • Calculating...");
+        }
+
         if (window.ytInitialData) {
             processPlaylistData(window.ytInitialData);
         }
     }
 
     function handleNavigation(event) {
-        // Clear any lingering fallback timers from previous navigation attempts
         clearTimers();
 
+        // 1. Trigger Loading State immediately if it's a playlist
+        if (new URLSearchParams(window.location.search).has('list')) {
+            pollAndInject(" • Calculating...");
+        } else {
+            // Not a playlist, don't show anything (and ensure cleanup)
+            removeInjectedElement();
+            return;
+        }
+
+        // 2. Try processing with the fast navigation data
         const responseData = event.detail && event.detail.response;
         const success = processPlaylistData(responseData);
 
         if (success) return;
 
+        // 3. Fallback: Wait for DOM component
         console.log("Playlist Time: Event data incomplete, waiting for DOM component...");
         
         activeFallbackTimeout = setTimeout(() => {
@@ -199,6 +215,8 @@
                     processPlaylistData(mockSource);
                 } else {
                     console.log("Playlist Time: Could not find fresh playlist data.");
+                    // If we failed to find data after waiting, remove the "Calculating..." text
+                    removeInjectedElement();
                 }
         }, 1500); 
     }
