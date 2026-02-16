@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         YouTube Playlist Total Duration & Remaining
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.3
 // @description  Calculates total playlist time + time remaining and displays it next to the video count. Handles SPA navigation correctly.
+// @author       You
 // @match        https://www.youtube.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @grant        none
@@ -14,6 +15,10 @@
     const TARGET_CONTAINER_SELECTOR = '.index-message-wrapper';
     const INJECTED_ID = 'playlist-total-duration';
 
+    // Global timers to manage cleanup during navigation
+    let activePollInterval = null;
+    let activeFallbackTimeout = null;
+
     // --- 1. CORE LOGIC ---
     
     // Returns true if processed successfully, false if no data found
@@ -22,11 +27,9 @@
         let playlistContents = sourceData?.contents?.twoColumnWatchNextResults?.playlist?.playlist?.contents;
 
         if (!playlistContents) {
-            // Not a playlist watch page, or structure changed
             return false;
         }
 
-        // Get current video ID from URL to calculate "Remaining"
         const currentVideoId = new URLSearchParams(window.location.search).get('v');
 
         let totalSeconds = 0;
@@ -43,16 +46,13 @@
                 if (durationText) {
                     const seconds = parseDuration(durationText);
                     
-                    // Add to total
                     totalSeconds += seconds;
                     videoCount++;
 
-                    // Check if this is the current video
                     if (videoId === currentVideoId) {
                         foundCurrentVideo = true;
                     }
 
-                    // Add to remaining if we have found the current video (Inclusive)
                     if (foundCurrentVideo) {
                         remainingSeconds += seconds;
                     }
@@ -62,7 +62,6 @@
 
         if (videoCount === 0) return false;
 
-        // Start UI Injection
         pollAndInject(totalSeconds, remainingSeconds);
         return true;
     }
@@ -71,7 +70,6 @@
     
     function parseDuration(timeStr) {
         if (!timeStr) return 0;
-        // Clean and split: "1:05" -> [1, 5] -> reverse [5, 1] (sec, min)
         const parts = timeStr.trim().split(':').map(Number).reverse();
         
         let seconds = 0;
@@ -83,7 +81,6 @@
     }
 
     function formatTime(totalSeconds) {
-        // Format: 25h 30m 10s
         const hours = Math.floor(totalSeconds / 3600);
         const minutes = Math.floor((totalSeconds % 3600) / 60);
         const seconds = totalSeconds % 60;
@@ -97,7 +94,6 @@
     }
 
     function formatDecimalHours(totalSeconds) {
-        // Format: 1.25h
         const hours = totalSeconds / 3600;
         return `${hours.toFixed(2)}h`;
     }
@@ -107,27 +103,40 @@
         if (el) el.remove();
     }
 
+    function clearTimers() {
+        if (activePollInterval) {
+            clearInterval(activePollInterval);
+            activePollInterval = null;
+        }
+        if (activeFallbackTimeout) {
+            clearTimeout(activeFallbackTimeout);
+            activeFallbackTimeout = null;
+        }
+    }
+
     // --- 3. UI INJECTION ---
     
     function pollAndInject(totalSeconds, remainingSeconds) {
-        // Wait for the UI container to exist and be visible
-        // We use a counter to stop polling if it takes too long
+        // Clear any previous pollers to prevent conflicts
+        if (activePollInterval) clearInterval(activePollInterval);
+
         let attempts = 0;
         
-        const pollInterval = setInterval(() => {
+        activePollInterval = setInterval(() => {
             attempts++;
             const indexWrapper = document.querySelector(TARGET_CONTAINER_SELECTOR);
             
-            // Check existence and rough visibility
             const isVisible = indexWrapper && (indexWrapper.offsetWidth > 0 || indexWrapper.offsetHeight > 0);
 
             if (isVisible) {
-                clearInterval(pollInterval);
+                clearInterval(activePollInterval);
+                activePollInterval = null;
                 injectText(indexWrapper, totalSeconds, remainingSeconds);
             }
 
-            if (attempts > 20) { // ~10 seconds
-                 clearInterval(pollInterval);
+            if (attempts > 20) { 
+                 clearInterval(activePollInterval);
+                 activePollInterval = null;
             }
         }, 500);
     }
@@ -136,7 +145,6 @@
         const formattedTotal = formatTime(totalSeconds);
         const formattedRemaining = formatDecimalHours(remainingSeconds);
         
-        // Final string: "• 25h 30m 10s (12.55h left)"
         const finalText = ` • ${formattedTotal} (${formattedRemaining} left)`;
 
         let durationSpan = document.getElementById(INJECTED_ID);
@@ -145,7 +153,6 @@
             durationSpan = document.createElement('span');
             durationSpan.id = INJECTED_ID;
             
-            // YouTube Metadata Styling
             durationSpan.style.color = 'var(--yt-spec-text-secondary)';
             durationSpan.style.marginLeft = '4px';
             durationSpan.style.fontSize = '1.2rem';
@@ -160,33 +167,26 @@
 
     // --- 4. EXECUTION HANDLERS ---
 
-    // Handler for the initial page load (Server Side Render)
     function handleInitialLoad() {
-        // On first load, ytInitialData IS valid and fresh
         if (window.ytInitialData) {
             processPlaylistData(window.ytInitialData);
         }
     }
 
-    // Handler for SPA Navigation (clicking videos/playlists without reload)
     function handleNavigation(event) {
-        // 1. Try using the event response (Most efficient & Accurate)
-        // This contains the NEW data for the page we just navigated to
+        // Clear any lingering fallback timers from previous navigation attempts
+        clearTimers();
+
         const responseData = event.detail && event.detail.response;
         const success = processPlaylistData(responseData);
 
         if (success) return;
 
-        // 2. Fallback: Polymer Component Data
-        // If event data didn't parse, wait for the DOM component to update.
-        // We DO NOT use window.ytInitialData here because it is stale.
         console.log("Playlist Time: Event data incomplete, waiting for DOM component...");
         
-        setTimeout(() => {
-            // Access the live data attached to the playlist element
+        activeFallbackTimeout = setTimeout(() => {
             const componentData = document.querySelector('ytd-playlist-panel-renderer')?.data;
                 if (componentData) {
-                    // Structure the mock to look like the API response
                     const mockSource = {
                         contents: {
                             twoColumnWatchNextResults: {
@@ -200,23 +200,19 @@
                 } else {
                     console.log("Playlist Time: Could not find fresh playlist data.");
                 }
-        }, 1500); // 1.5s delay to let the UI framework settle
+        }, 1500); 
     }
     
     function handleNavigationStart() {
-        // Remove the old time immediately so we don't show stale info while loading
+        // STOP everything from the previous page
+        clearTimers();
         removeInjectedElement();
     }
 
     // --- 5. LISTENERS ---
     
-    // 1. Run immediately on fresh load
     handleInitialLoad();
-
-    // 2. Listen for navigation start (to clear UI immediately)
     window.addEventListener('yt-navigate-start', handleNavigationStart);
-
-    // 3. Listen for navigation finish (to calculate new data)
     window.addEventListener('yt-navigate-finish', handleNavigation);
 
 })();
