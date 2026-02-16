@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         YouTube Playlist Total Duration
+// @name         YouTube Playlist Total Duration & Remaining
 // @namespace    http://tampermonkey.net/
-// @version      2.1
-// @description  Calculates total playlist time using internal YouTube data (ytInitialData) and displays it next to the video count
+// @version      3.2
+// @description  Calculates total playlist time + time remaining and displays it next to the video count. Handles SPA navigation correctly.
 // @match        https://www.youtube.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @grant        none
@@ -14,40 +14,66 @@
     const TARGET_CONTAINER_SELECTOR = '.index-message-wrapper';
     const INJECTED_ID = 'playlist-total-duration';
 
-    // --- 1. DATA EXTRACTION (Instant & Reliable) ---
-    function getPlaylistTotalSeconds() {
-        // We look for the data specifically on the "Watch" page (side panel playlist)
-        // Path: contents -> twoColumnWatchNextResults -> playlist -> playlist -> contents
-        const data = window.ytInitialData?.contents?.twoColumnWatchNextResults?.playlist?.playlist?.contents;
+    // --- 1. CORE LOGIC ---
+    
+    // Returns true if processed successfully, false if no data found
+    function processPlaylistData(sourceData) {
+        // Path to playlist contents on the "Watch" page
+        let playlistContents = sourceData?.contents?.twoColumnWatchNextResults?.playlist?.playlist?.contents;
 
-        if (!data) return null; // Not a playlist watch page
+        if (!playlistContents) {
+            // Not a playlist watch page, or structure changed
+            return false;
+        }
+
+        // Get current video ID from URL to calculate "Remaining"
+        const currentVideoId = new URLSearchParams(window.location.search).get('v');
 
         let totalSeconds = 0;
+        let remainingSeconds = 0;
+        let foundCurrentVideo = false;
         let videoCount = 0;
 
-        data.forEach(item => {
+        playlistContents.forEach(item => {
             const renderer = item.playlistPanelVideoRenderer;
             if (renderer) {
-                // Duration is usually in simpleText (e.g. "1:23")
                 const durationText = renderer.lengthText?.simpleText;
+                const videoId = renderer.videoId;
+
                 if (durationText) {
-                    totalSeconds += parseDuration(durationText);
+                    const seconds = parseDuration(durationText);
+                    
+                    // Add to total
+                    totalSeconds += seconds;
                     videoCount++;
+
+                    // Check if this is the current video
+                    if (videoId === currentVideoId) {
+                        foundCurrentVideo = true;
+                    }
+
+                    // Add to remaining if we have found the current video (Inclusive)
+                    if (foundCurrentVideo) {
+                        remainingSeconds += seconds;
+                    }
                 }
             }
         });
 
-        if (videoCount === 0) return null;
-        return totalSeconds;
+        if (videoCount === 0) return false;
+
+        // Start UI Injection
+        pollAndInject(totalSeconds, remainingSeconds);
+        return true;
     }
 
     // --- 2. HELPERS ---
+    
     function parseDuration(timeStr) {
         if (!timeStr) return 0;
-        // Split "1:05" -> [1, 5], reverse to [5, 1] (seconds, minutes)
-        // This handles ss, mm:ss, hh:mm:ss, d:hh:mm:ss automatically
+        // Clean and split: "1:05" -> [1, 5] -> reverse [5, 1] (sec, min)
         const parts = timeStr.trim().split(':').map(Number).reverse();
-
+        
         let seconds = 0;
         if (parts[0]) seconds += parts[0];           // Seconds
         if (parts[1]) seconds += parts[1] * 60;      // Minutes
@@ -57,7 +83,7 @@
     }
 
     function formatTime(totalSeconds) {
-        // Calculate hours directly (allowing > 24h) rather than rolling over to Days
+        // Format: 25h 30m 10s
         const hours = Math.floor(totalSeconds / 3600);
         const minutes = Math.floor((totalSeconds % 3600) / 60);
         const seconds = totalSeconds % 60;
@@ -65,70 +91,132 @@
         let output = "";
         if (hours > 0) output += `${hours}h `;
         output += `${minutes}m`;
-        output += ` ${seconds}s`;
-
+        output += ` ${seconds}s`; 
+        
         return output;
     }
 
-    // --- 3. INJECTION LOGIC ---
-    function processPlaylist() {
-        // Step A: Calculate Time (Data Layer)
-        const totalSeconds = getPlaylistTotalSeconds();
+    function formatDecimalHours(totalSeconds) {
+        // Format: 1.25h
+        const hours = totalSeconds / 3600;
+        return `${hours.toFixed(2)}h`;
+    }
 
-        // If no playlist data found, we stop.
-        if (totalSeconds === null) return;
+    function removeInjectedElement() {
+        const el = document.getElementById(INJECTED_ID);
+        if (el) el.remove();
+    }
 
-        // Step B: Wait for UI (View Layer)
-        // We poll briefly for the container to appear
+    // --- 3. UI INJECTION ---
+    
+    function pollAndInject(totalSeconds, remainingSeconds) {
+        // Wait for the UI container to exist and be visible
+        // We use a counter to stop polling if it takes too long
+        let attempts = 0;
+        
         const pollInterval = setInterval(() => {
+            attempts++;
             const indexWrapper = document.querySelector(TARGET_CONTAINER_SELECTOR);
-
-            // Check existence and visibility
+            
+            // Check existence and rough visibility
             const isVisible = indexWrapper && (indexWrapper.offsetWidth > 0 || indexWrapper.offsetHeight > 0);
 
             if (isVisible) {
                 clearInterval(pollInterval);
-                injectText(indexWrapper, totalSeconds);
+                injectText(indexWrapper, totalSeconds, remainingSeconds);
+            }
+
+            if (attempts > 20) { // ~10 seconds
+                 clearInterval(pollInterval);
             }
         }, 500);
-
-        // Safety timeout: stop polling after 10 seconds if UI never loads
-        setTimeout(() => clearInterval(pollInterval), 10000);
     }
 
-    function injectText(container, totalSeconds) {
-        // Avoid duplicates
-        if (document.getElementById(INJECTED_ID)) {
-             // If it exists, just update text (in case playlist changed length dynamically)
-             document.getElementById(INJECTED_ID).textContent = ` • ${formatTime(totalSeconds)}`;
-             return;
+    function injectText(container, totalSeconds, remainingSeconds) {
+        const formattedTotal = formatTime(totalSeconds);
+        const formattedRemaining = formatDecimalHours(remainingSeconds);
+        
+        // Final string: "• 25h 30m 10s (12.55h left)"
+        const finalText = ` • ${formattedTotal} (${formattedRemaining} left)`;
+
+        let durationSpan = document.getElementById(INJECTED_ID);
+        
+        if (!durationSpan) {
+            durationSpan = document.createElement('span');
+            durationSpan.id = INJECTED_ID;
+            
+            // YouTube Metadata Styling
+            durationSpan.style.color = 'var(--yt-spec-text-secondary)';
+            durationSpan.style.marginLeft = '4px';
+            durationSpan.style.fontSize = '1.2rem';
+            durationSpan.style.fontWeight = '400';
+            
+            container.appendChild(durationSpan);
         }
 
-        const formattedTime = formatTime(totalSeconds);
-
-        const durationSpan = document.createElement('span');
-        durationSpan.id = INJECTED_ID;
-        durationSpan.textContent = ` • ${formattedTime}`;
-
-        // Styling to match YouTube
-        durationSpan.style.color = 'var(--yt-spec-text-secondary)';
-        durationSpan.style.marginLeft = '4px';
-        durationSpan.style.fontSize = '1.2rem';
-        durationSpan.style.fontWeight = '400';
-
-        container.appendChild(durationSpan);
-        console.log(`Playlist Total Injected: ${formattedTime}`);
+        durationSpan.textContent = finalText;
+        console.log(`Playlist Updated: ${finalText}`);
     }
 
-    // --- 4. EXECUTION TRIGGERS ---
+    // --- 4. EXECUTION HANDLERS ---
 
-    // Run on initial page load
-    processPlaylist();
+    // Handler for the initial page load (Server Side Render)
+    function handleInitialLoad() {
+        // On first load, ytInitialData IS valid and fresh
+        if (window.ytInitialData) {
+            processPlaylistData(window.ytInitialData);
+        }
+    }
 
-    // Run when navigating between videos (YouTube is a Single Page App)
-    window.addEventListener('yt-navigate-finish', () => {
-        // We add a tiny delay to ensure internal data is updated if navigating playlists
-        setTimeout(processPlaylist, 500);
-    });
+    // Handler for SPA Navigation (clicking videos/playlists without reload)
+    function handleNavigation(event) {
+        // 1. Try using the event response (Most efficient & Accurate)
+        // This contains the NEW data for the page we just navigated to
+        const responseData = event.detail && event.detail.response;
+        const success = processPlaylistData(responseData);
+
+        if (success) return;
+
+        // 2. Fallback: Polymer Component Data
+        // If event data didn't parse, wait for the DOM component to update.
+        // We DO NOT use window.ytInitialData here because it is stale.
+        console.log("Playlist Time: Event data incomplete, waiting for DOM component...");
+        
+        setTimeout(() => {
+            // Access the live data attached to the playlist element
+            const componentData = document.querySelector('ytd-playlist-panel-renderer')?.data;
+                if (componentData) {
+                    // Structure the mock to look like the API response
+                    const mockSource = {
+                        contents: {
+                            twoColumnWatchNextResults: {
+                                playlist: {
+                                    playlist: componentData
+                                }
+                            }
+                        }
+                    };
+                    processPlaylistData(mockSource);
+                } else {
+                    console.log("Playlist Time: Could not find fresh playlist data.");
+                }
+        }, 1500); // 1.5s delay to let the UI framework settle
+    }
+    
+    function handleNavigationStart() {
+        // Remove the old time immediately so we don't show stale info while loading
+        removeInjectedElement();
+    }
+
+    // --- 5. LISTENERS ---
+    
+    // 1. Run immediately on fresh load
+    handleInitialLoad();
+
+    // 2. Listen for navigation start (to clear UI immediately)
+    window.addEventListener('yt-navigate-start', handleNavigationStart);
+
+    // 3. Listen for navigation finish (to calculate new data)
+    window.addEventListener('yt-navigate-finish', handleNavigation);
 
 })();
