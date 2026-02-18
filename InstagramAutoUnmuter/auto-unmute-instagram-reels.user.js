@@ -12,14 +12,13 @@
     'use strict';
 
     function runScript() {
-        const test = document.querySelector("div[aria-label='Video player']");
+        const audioButtonSVG = document.querySelector("svg[aria-label='Audio is muted']");
 
-        if (test) {
+        if (audioButtonSVG) {
             try {
-                const target = test.children[0]?.children[0]?.children[0]?.children[0]?.children[0];
-
-                if (target) {
-                    target.click();
+                const audioButton = audioButtonSVG.parentElement;
+                if (audioButton) {
+                    audioButton.click();
                     console.log("Script: Successfully clicked the nested element.");
                 }
             } catch (error) {
