@@ -280,7 +280,7 @@
         removeInjectedElement();
     }
 
-    // --- 7. VIDEO TIME REMAINING INJECTION ---
+    // --- 6. VIDEO TIME REMAINING INJECTION ---
 
     function formatTimeRemaining(totalSeconds) {
         totalSeconds = Math.max(0, Math.floor(totalSeconds));
@@ -300,7 +300,11 @@
         const vid = document.querySelector('video');
         if (!vid) return;
 
-        const remaining = (vid.duration - vid.currentTime) / (vid.playbackRate > 0 ? vid.playbackRate : 1);
+        const speed = vid.playbackRate > 0 ? vid.playbackRate : 1;
+        const timeWatched = vid.currentTime; 
+        const videoDuration = vid.duration;
+        if (isNaN(videoDuration) || isNaN(timeWatched)) return; 
+        const remaining = (videoDuration - timeWatched) / speed;
 
         let span = document.getElementById(TIME_REMAINING_ID);
         if (!span) {
@@ -357,7 +361,7 @@
 
     initTimeRemaining();
 
-    // --- 6. LISTENERS ---
+    // --- 7. LISTENERS ---
 
     handleInitialLoad();
     window.addEventListener('yt-navigate-start', handleNavigationStart);
