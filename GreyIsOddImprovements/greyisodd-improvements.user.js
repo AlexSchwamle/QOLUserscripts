@@ -17,7 +17,7 @@
             transition: background 0.15s ease, box-shadow 0.15s ease;
         }
 
-        .hint:hover {
+        .hint:not(.ok):hover {
             background: #3e3e55;
             box-shadow: 0 0 8px rgba(240, 240, 240, 0.3);
         }
