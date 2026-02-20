@@ -13,6 +13,7 @@
 
     const TARGET_CONTAINER_SELECTOR = '.index-message-wrapper';
     const INJECTED_ID = 'playlist-total-duration';
+    const TIME_REMAINING_ID = 'ytp-time-remaining-custom';
 
     // Global timers to manage cleanup during navigation
     let activePollInterval = null;
@@ -24,7 +25,7 @@
     let videoElement = null;
 
     // --- 1. CORE LOGIC ---
-    
+
     // Returns true if processed successfully, false if no data found
     function processPlaylistData(sourceData) {
         // Path to playlist contents on the "Watch" page
@@ -49,7 +50,7 @@
 
                 if (durationText) {
                     const seconds = parseDuration(durationText);
-                    
+
                     totalSeconds += seconds;
                     videoCount++;
 
@@ -83,14 +84,14 @@
 
     function setupSpeedListener() {
         const vid = document.querySelector('video');
-        
+
         // Only attach if it's a new element or we haven't attached yet
         if (vid && vid !== videoElement) {
             // Cleanup old listener if exists
             if (videoElement) {
                 videoElement.removeEventListener('ratechange', updateUIText);
             }
-            
+
             videoElement = vid;
             videoElement.addEventListener('ratechange', updateUIText);
         }
@@ -107,7 +108,7 @@
         // Format
         const formattedTotal = formatTime(gTotalSeconds);
         const formattedRemaining = formatDecimalHours(adjustedRemaining);
-        
+
         // removed leading space as requested
         const finalText = `• ${formattedTotal} (${formattedRemaining} left)`;
 
@@ -115,11 +116,11 @@
     }
 
     // --- 3. HELPERS ---
-    
+
     function parseDuration(timeStr) {
         if (!timeStr) return 0;
         const parts = timeStr.trim().split(':').map(Number).reverse();
-        
+
         let seconds = 0;
         if (parts[0]) seconds += parts[0];           // Seconds
         if (parts[1]) seconds += parts[1] * 60;      // Minutes
@@ -136,8 +137,8 @@
         let output = "";
         if (hours > 0) output += `${hours}h `;
         output += `${minutes}m`;
-        output += ` ${seconds}s`; 
-        
+        output += ` ${seconds}s`;
+
         return output;
     }
 
@@ -163,7 +164,7 @@
     }
 
     // --- 4. UI INJECTION ---
-    
+
     function pollAndInject(textToInject) {
         // Optimization: If element already exists, update immediately for reactivity
         // This makes scrolling the speed wheel feel instant
@@ -177,11 +178,11 @@
         if (activePollInterval) clearInterval(activePollInterval);
 
         let attempts = 0;
-        
+
         activePollInterval = setInterval(() => {
             attempts++;
             const indexWrapper = document.querySelector(TARGET_CONTAINER_SELECTOR);
-            
+
             const isVisible = indexWrapper && (indexWrapper.offsetWidth > 0 || indexWrapper.offsetHeight > 0);
 
             if (isVisible) {
@@ -190,7 +191,7 @@
                 injectText(indexWrapper, textToInject);
             }
 
-            if (attempts > 20) { 
+            if (attempts > 20) {
                  clearInterval(activePollInterval);
                  activePollInterval = null;
             }
@@ -199,16 +200,16 @@
 
     function injectText(container, text) {
         let durationSpan = document.getElementById(INJECTED_ID);
-        
+
         if (!durationSpan) {
             durationSpan = document.createElement('span');
             durationSpan.id = INJECTED_ID;
-            
+
             durationSpan.style.color = 'var(--yt-spec-text-secondary)';
             durationSpan.style.marginLeft = '4px';
             durationSpan.style.fontSize = '1.2rem';
             durationSpan.style.fontWeight = '400';
-            
+
             container.appendChild(durationSpan);
         }
 
@@ -253,7 +254,7 @@
 
         // 3. Fallback: Wait for DOM component
         console.log("Playlist Time: Event data incomplete, waiting for DOM component...");
-        
+
         activeFallbackTimeout = setTimeout(() => {
             const componentData = document.querySelector('ytd-playlist-panel-renderer')?.data;
                 if (componentData) {
@@ -271,16 +272,93 @@
                     console.log("Playlist Time: Could not find fresh playlist data.");
                     removeInjectedElement();
                 }
-        }, 1500); 
+        }, 1500);
     }
-    
+
     function handleNavigationStart() {
         clearTimers();
         removeInjectedElement();
     }
 
+    // --- 7. VIDEO TIME REMAINING INJECTION ---
+
+    function formatTimeRemaining(totalSeconds) {
+        totalSeconds = Math.max(0, Math.floor(totalSeconds));
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+
+        let output = '';
+        if (hours > 0) output += `${hours}h`;
+        output += `${minutes}m`;
+        output += `${seconds}s`;
+
+        return `(${output})`;
+    }
+
+    function updateTimeRemaining() {
+        const vid = document.querySelector('video');
+        if (!vid) return;
+
+        const remaining = (vid.duration - vid.currentTime) / (vid.playbackRate > 0 ? vid.playbackRate : 1);
+
+        let span = document.getElementById(TIME_REMAINING_ID);
+        if (!span) {
+            const durationEl = document.querySelector('.ytp-time-duration');
+            if (!durationEl) return;
+
+            // Create the space text node and span via DOM API (avoids Trusted Types CSP)
+            const space = document.createTextNode(' ');
+            span = document.createElement('span');
+            span.id = TIME_REMAINING_ID;
+            span.style.color = 'rgba(255,255,255,0.7)';
+            span.style.fontSize = 'inherit';
+            span.style.fontWeight = '400';
+
+            durationEl.after(space, span);
+        }
+
+        span.textContent = formatTimeRemaining(remaining);
+    }
+
+    function setupTimeRemainingListener() {
+        const vid = document.querySelector('video');
+        if (!vid || vid._timeRemainingAttached) return;
+
+        vid._timeRemainingAttached = true;
+        vid.addEventListener('timeupdate', updateTimeRemaining);
+        vid.addEventListener('ratechange', updateTimeRemaining);
+        vid.addEventListener('seeking', updateTimeRemaining);
+    }
+
+    // Poll for video element availability (handles SPA navigation)
+    function initTimeRemaining() {
+        const removeTimeRemaining = () => {
+            const el = document.getElementById(TIME_REMAINING_ID);
+            if (el) el.remove();
+        };
+
+        window.addEventListener('yt-navigate-start', () => {
+            removeTimeRemaining();
+            const vid = document.querySelector('video');
+            if (vid) vid._timeRemainingAttached = false;
+        });
+
+        // Poll until video element exists
+        const poll = setInterval(() => {
+            const vid = document.querySelector('video');
+            if (vid && document.querySelector('.ytp-time-duration')) {
+                setupTimeRemainingListener();
+                updateTimeRemaining();
+                clearInterval(poll);
+            }
+        }, 500);
+    }
+
+    initTimeRemaining();
+
     // --- 6. LISTENERS ---
-    
+
     handleInitialLoad();
     window.addEventListener('yt-navigate-start', handleNavigationStart);
     window.addEventListener('yt-navigate-finish', handleNavigation);
